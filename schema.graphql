@@ -1,6 +1,43 @@
-type Gravatar @entity {
+type Question @entity {
   id: ID!
-  owner: Bytes!
-  displayName: String!
-  imageUrl: String!
+
+  templateId: BigInt!
+  data: String!
+  title: String
+  outcomes: [String!]
+  category: String
+  language: String
+
+  arbitrator: Bytes!
+  openingTimestamp: BigInt!
+  timeout: BigInt!
+
+  currentAnswer: Bytes
+  currentAnswerBond: BigInt
+  currentAnswerTimestamp: BigInt
+
+  arbitrationRequestedTimestamp: BigInt
+  arbitrationRequestedBy: String
+  isPendingArbitration: Boolean!
+  arbitrationOccurred: Boolean!
+
+  answerFinalizedTimestamp: BigInt
+
+  answers: [Answer!] @derivedFrom(field: "question")
 }
+
+type Answer @entity {
+  id: ID!
+  timestamp: BigInt!
+  answer: Bytes!
+  bondAggregate: BigInt!
+  question: Question!
+}
+
+type Category @entity {
+  id: ID!
+  numConditions: Int!
+  numOpenConditions: Int!
+  numClosedConditions: Int!
+}
+
