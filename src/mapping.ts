@@ -1,14 +1,20 @@
 import { crypto, log, BigInt, Bytes, ByteArray } from '@graphprotocol/graph-ts'
+import { json, JSONValueKind } from '@graphprotocol/graph-ts'
 
 import { unescape } from './utils/unescape'
+import { sprintf } from './utils/sprintf'
 
 import { 
     Question,
+    Outcome,
+    Response,
     Answer,
     Category,
+    Template,
 } from '../generated/schema'
 
 import {
+  LogNewTemplate,
   LogNewQuestion,
   LogNewAnswer,
   LogNotifyOfArbitrationRequest,
@@ -16,68 +22,70 @@ import {
   LogAnswerReveal,
 } from '../generated/Realitio/Realitio'
 
+export function handleNewTemplate(event: LogNewTemplate): void {
+  let tmpl = new Template(event.params.template_id.toHexString());
+  tmpl.user = event.params.user;
+  tmpl.question_text = event.params.question_text;
+  tmpl.save()
+}
+
 export function handleNewQuestion(event: LogNewQuestion): void {
   let questionId = event.params.question_id.toHexString();
   let question = new Question(questionId);
   let templateId = event.params.template_id
   let templateIdI32 = templateId.toI32();
-  if (templateIdI32 == 2) {
-    question.templateId = templateId;
 
-    let data = event.params.question;
-    question.data = data;
-  
-    let fields = data.split('\u241f', 4);
-  
-    if (fields.length >= 1) {
-      question.title = unescape(fields[0]);
-      if (fields.length >= 2) {
-        let outcomesData = fields[1];
-        let start = -1;
-        let escaped = false
-        let outcomes = new Array<string>(0);
-        for (let i = 0; i < outcomesData.length; i++) {
-          if (escaped) {
-            escaped = false;
-          } else {
-            if (outcomesData[i] == '"') {
-              if (start == -1) {
-                start = i + 1;
-              } else {
-                outcomes.push(unescape(outcomesData.slice(start, i)));
-                start = -1;
-              }
-            } else if (outcomesData[i] == '\\') {
-              escaped = true;
-            }
-          }
-        }
-        question.outcomes = outcomes;
-        if (fields.length >= 3) {
-          let categoryId = unescape(fields[2])
-          question.category = categoryId;
-          let category = Category.load(categoryId);
-          if (category == null) {
-            category = new Category(categoryId);
-            category.numConditions = 0;
-            category.numOpenConditions = 0;
-            category.numClosedConditions = 0;
-            category.save();
-          }
+  let tmpl = Template.load(templateId.toHexString());
+  let question_text = tmpl.question_text;
 
-          if (fields.length >= 4) {
-            question.language = unescape(fields[3]);
-          }
+  let data = event.params.question;
+  let fields = data.split('\u241f');
+
+  let json_str = sprintf(question_text, fields)  
+
+  question.templateId = templateId;
+
+  let tryData = json.try_fromBytes(ByteArray.fromUTF8(json_str) as Bytes)
+  if (tryData.isOk) {
+    let json_dict = tryData.value.toObject()
+
+    let q_title = json_dict.get('title')
+    if (q_title != null && q_title.kind === JSONValueKind.STRING) {
+      question.q_title = q_title.toString()
+    }
+
+    let q_category = json_dict.get('category')
+    if (q_category != null && q_category.kind == JSONValueKind.STRING) {
+        question.q_category = q_category.toString();
+    }
+
+    let q_lang = json_dict.get('lang')
+    if (q_lang != null && q_lang.kind == JSONValueKind.STRING) {
+        question.q_lang = q_lang.toString();
+    }
+
+    let q_type = json_dict.get('type')
+    if (q_type != null && q_type.kind == JSONValueKind.STRING) {
+        question.q_type = q_type.toString();
+    }
+
+    let q_outcomes_val = json_dict.get('outcomes')
+    if (q_outcomes_val != null && q_outcomes_val.kind === JSONValueKind.ARRAY) {
+      let q_outcomes = q_outcomes_val.toArray()
+      for(let i = 0; i < q_outcomes.length; i++) {
+          let outcomeID = questionId + '_' + i.toString();
+          let outcome = new Outcome(outcomeID);
+          outcome.answer = q_outcomes[i].toString()
+          outcome.question = questionId;
+          outcome.save()
         }
-      }
     }
   } else {
-    log.info('ignoring question {} with template ID {}', [
-      questionId,
-      templateId.toString(),
-    ]);
-    return;
+    log.info('Could not parse json for question {}', [questionId]);
   }
+
+  question.data = data
+  question.json_str = json_str
 
   question.arbitrator = event.params.arbitrator;
   question.openingTimestamp = event.params.opening_ts;
@@ -89,52 +97,68 @@ export function handleNewQuestion(event: LogNewQuestion): void {
   question.save();
 }
 
-function saveNewAnswer(questionId: string, answer: Bytes, bond: BigInt, ts: BigInt): void {
+export function handleNewAnswer(event: LogNewAnswer): void {
+
+  let questionId = event.params.question_id.toHexString();
   let question = Question.load(questionId);
   if (question == null) {
     log.info('cannot find question {} to answer', [questionId]);
     return;
   }
 
-  let answerId = questionId + '_' + answer.toHexString();
-  let answerEntity = Answer.load(answerId);
-  if(answerEntity == null) {
-    answerEntity = new Answer(answerId);
-    answerEntity.question = questionId;
-    answerEntity.answer = answer;
-    answerEntity.bondAggregate = bond;
-    answerEntity.timestamp = ts;
-    answerEntity.save();
+  let ts = event.params.ts
+  let isCommitment = event.params.is_commitment;
+
+  let responseId = questionId + '_' + event.params.bond.toHexString();
+  let response = new Response(responseId);
+  response.question = questionId;
+  if (isCommitment) {
+    response.commitmentId = event.params.answer;
+    response.isUnrevealed = true;
   } else {
-    answerEntity.bondAggregate = answerEntity.bondAggregate.plus(bond);
-    answerEntity.timestamp = ts;
-    answerEntity.save();
+    response.answer = event.params.answer;
+    response.isUnrevealed = false;
   }
+  response.bond = event.params.bond;
+  response.answerer = event.params.user;
+  response.timestamp = event.params.ts;
+  response.isCommitment = isCommitment;
+  response.save();
+
+  if (!isCommitment) {
+    saveAnswer(questionId, event.params.answer, event.params.bond, event.params.ts);
+  }
+  // response.bondAggregate = response.bondAggregate.plus(bond);
+
+    /*
+    response.bondAggregate = response.bondAggregate.plus(bond);
+    response.timestamp = ts;
+*/
 
   let answerFinalizedTimestamp = question.arbitrationOccurred ? ts : ts.plus(question.timeout);
 
-  question.currentAnswer = answer;
-  question.currentAnswerBond = bond;
-  question.currentAnswerTimestamp = ts;
+  question.currentAnswer = event.params.answer;
+  question.currentAnswerBond = event.params.bond;
+  question.currentAnswerTimestamp = event.params.ts;
   question.answerFinalizedTimestamp = answerFinalizedTimestamp;
 
   question.save();
 
 }
 
-export function handleNewAnswer(event: LogNewAnswer): void {
-  if (event.params.is_commitment) {
-    // only record confirmed answers
-    return;
-  }
-
-  let questionId = event.params.question_id.toHexString();
-  saveNewAnswer(questionId, event.params.answer, event.params.bond, event.params.ts);
-}
-
 export function handleAnswerReveal(event: LogAnswerReveal): void {
   let questionId = event.params.question_id.toHexString();
-  saveNewAnswer(questionId, event.params.answer, event.params.bond, event.block.timestamp);
+  let responseId = questionId + '_' + event.params.bond.toHexString();
+
+  let response = Response.load(responseId);
+  if (response == null) {
+    //log.info('cannot find answer {} for reveal', [event.params.answer]);
+    return;
+  }
+  response.answer = event.params.answer;
+  response.isUnrevealed = false;
+  // TODO: Handle question updates etc
+  response.save()
 }
 
 export function handleArbitrationRequest(event: LogNotifyOfArbitrationRequest): void {
@@ -169,3 +193,40 @@ export function handleFinalize(event: LogFinalize): void {
   question.save();
 
 }
+
+function saveAnswer(questionId: string, answer: Bytes, bond: BigInt, ts: BigInt): void {
+  let question = Question.load(questionId);
+  if (question == null) {
+    log.info('cannot find question {} to answer', [questionId]);
+    return;
+  }
+
+  let answerId = questionId + '_' + answer.toHexString();
+  let answerEntity = Answer.load(answerId);
+  if(answerEntity == null) {
+    answerEntity = new Answer(answerId);
+    answerEntity.question = questionId;
+    answerEntity.answer = answer;
+    answerEntity.bondAggregate = bond;
+    answerEntity.lastBond = bond;
+    answerEntity.timestamp = ts;
+    answerEntity.save();
+  } else {
+    answerEntity.bondAggregate = answerEntity.bondAggregate.plus(bond);
+    answerEntity.timestamp = ts;
+    if (bond > answerEntity.lastBond) {
+      answerEntity.lastBond = bond;
+    }
+    answerEntity.save();
+  }
+
+  let answerFinalizedTimestamp = question.arbitrationOccurred ? ts : ts.plus(question.timeout);
+
+  question.currentAnswer = answer;
+  question.currentAnswerBond = bond;
+  question.currentAnswerTimestamp = ts;
+  question.answerFinalizedTimestamp = answerFinalizedTimestamp;
+
+  question.save();
+}
+
