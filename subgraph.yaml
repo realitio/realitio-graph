@@ -1,6 +1,6 @@
 specVersion: 0.0.2
 description: Reality.eth
-repository: https://github.com/graphprotocol/example-subgraph
+repository: https://github.com/realitio/realitio-graph/
 schema:
   file: ./schema.graphql
 dataSources:
